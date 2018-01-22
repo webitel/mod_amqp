@@ -92,7 +92,7 @@
                 <param name="exchange-name" value="TAP.CDR"/>
                 <param name="exchange-type" value="topic"/>
                 <param name="circuit_breaker_ms" value="10000"/>
-                <param name="reconnect_interval_ms" value="100"/>
+                <param name="reconnect_interval_ms" value="1000"/>
                 <param name="delivery-mode" value="2"/>
 
                 <param name="send_queue_size" value="100"/>
