@@ -96,16 +96,16 @@
                 <param name="delivery-mode" value="2"/>
 
                 <param name="send_queue_size" value="100"/>
-                <param name="enable_fallback_format_fields" value="1"/>
 
                 <param name="queue-name-leg-a" value="cdr-leg-a"/>
                 <param name="queue-name-leg-b" value="cdr-leg-b"/>
 
 
+                <param name="enable_fallback_format_fields" value="0"/>
                 <!-- The routing key is made from the format string, using the header values in the event specified in the format_fields.-->
                 <!-- Fields that are prefixed with a # are treated as literals rather than doing a header lookup -->
                 <param name="format_fields"
-                       value="#FreeSWITCH,FreeSWITCH-Hostname,Event-Name,Event-Subclass,Unique-ID"/>
+                       value="#FreeSWITCH,LEG,uuid"/>
             </params>
         </profile>
     </cdr>

@@ -17,13 +17,46 @@ static switch_state_handler_table_t state_handlers = {
 };
 
 
+static switch_status_t mod_amqp_cdr_routing_key(int is_b, char routingKey[MAX_AMQP_ROUTING_KEY_LENGTH],
+                                         switch_channel_t* channel, mod_amqp_keypart_t routingKeyEventHeaderNames[]) {
+
+    int i = 0, idx = 0, x = 0;
+    char keybuffer[MAX_AMQP_ROUTING_KEY_LENGTH];
+
+    for (i = 0; i < MAX_ROUTING_KEY_FORMAT_FIELDS && idx < MAX_AMQP_ROUTING_KEY_LENGTH; i++) {
+        if (routingKeyEventHeaderNames[i].size) {
+            if (idx) {
+                routingKey[idx++] = '.';
+            }
+            for( x = 0; x < routingKeyEventHeaderNames[i].size; x++) {
+                if (routingKeyEventHeaderNames[i].name[x][0] == '#') {
+                    strncpy(routingKey + idx, routingKeyEventHeaderNames[i].name[x] + 1, MAX_AMQP_ROUTING_KEY_LENGTH - idx);
+                    break;
+                } else if (!strncmp(routingKeyEventHeaderNames[i].name[x], "LEG", 3)) {
+                    strncpy(routingKey + idx, is_b ? "b" : "a", MAX_AMQP_ROUTING_KEY_LENGTH - idx);
+                    break;
+                } else {
+                    char *value = (char *)switch_channel_get_variable(channel, routingKeyEventHeaderNames[i].name[x]);
+                    if (value) {
+                        amqp_util_encode(value, keybuffer);
+                        strncpy(routingKey + idx, keybuffer, MAX_AMQP_ROUTING_KEY_LENGTH - idx);
+                        break;
+                    }
+                }
+            }
+            idx += strlen(routingKey + idx);
+        }
+    }
+
+    return SWITCH_STATUS_SUCCESS;
+}
+
 /* This should only be called in a single threaded context from the cdr profile send thread */
 switch_status_t mod_amqp_cdr_send(mod_amqp_cdr_profile_t *profile, mod_amqp_message_t *msg)
 {
-    amqp_table_entry_t messageTableEntries[2];
+    amqp_table_entry_t messageTableEntries[1];
     amqp_basic_properties_t props;
     int status;
-    uint64_t timestamp;
 
     if (!profile->conn_active) {
         /* No connection, so we can not send the message. */
@@ -40,18 +73,22 @@ switch_status_t mod_amqp_cdr_send(mod_amqp_cdr_profile_t *profile, mod_amqp_mess
         props.delivery_mode = profile->delivery_mode;
     }
 
-    if(profile->delivery_timestamp) {
-        props._flags |= AMQP_BASIC_TIMESTAMP_FLAG | AMQP_BASIC_HEADERS_FLAG;
-        props.timestamp = (uint64_t)time(NULL);
+    if (profile->enable_fallback_format_fields) {
+        amqp_array_t inner_array;
+        amqp_field_value_t inner_values[1];
+
+        props._flags |= AMQP_BASIC_HEADERS_FLAG;
         props.headers.num_entries = 1;
+
+        inner_values[0].kind = AMQP_FIELD_KIND_UTF8;
+        inner_values[0].value.bytes = amqp_cstring_bytes(msg->cc_routing_key);
+        inner_array.num_entries = 1;
+        inner_array.entries = inner_values;
+        props.headers.num_entries = 1;
+        messageTableEntries[0].key = amqp_cstring_bytes("BCC");
+        messageTableEntries[0].value.kind = AMQP_FIELD_KIND_ARRAY;
+        messageTableEntries[0].value.value.array = inner_array;
         props.headers.entries = messageTableEntries;
-        timestamp = (uint64_t)switch_micro_time_now();
-        messageTableEntries[0].key = amqp_cstring_bytes("x_Liquid_MessageSentTimeStamp");
-        messageTableEntries[0].value.kind = AMQP_FIELD_KIND_TIMESTAMP;
-        messageTableEntries[0].value.value.u64 = (uint64_t)(timestamp / 1000000);
-        messageTableEntries[1].key = amqp_cstring_bytes("x_Liquid_MessageSentTimeStampMicro");
-        messageTableEntries[1].value.kind = AMQP_FIELD_KIND_U64;
-        messageTableEntries[1].value.value.u64 = timestamp;
     }
 
     status = amqp_basic_publish(
@@ -91,7 +128,7 @@ switch_status_t mod_amqp_cdr_reporting(switch_core_session_t *session)
 
     is_b = channel && switch_channel_get_originator_caller_profile(channel);
 
-    if (switch_ivr_generate_json_cdr(session, &json_cdr, TRUE) != SWITCH_STATUS_SUCCESS) {
+    if (switch_ivr_generate_json_cdr(session, &json_cdr, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS) {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error Generating Data!\n");
         return SWITCH_STATUS_FALSE;
     }
@@ -99,8 +136,6 @@ switch_status_t mod_amqp_cdr_reporting(switch_core_session_t *session)
     json_text = cJSON_PrintUnformatted(json_cdr);
 
     /*
-     *
-     *
       1. Loop through cdr hash of profiles. Check for a profile that accepts this logging level, and file regex.
       2. If event not already parsed/created, then create it now
       3. Queue copy of event into cdr profile send queue
@@ -113,6 +148,10 @@ switch_status_t mod_amqp_cdr_reporting(switch_core_session_t *session)
             /* Create message */
             switch_malloc(msg, sizeof(mod_amqp_message_t));
             msg->pjson = strdup(json_text);
+
+            if (cdr->enable_fallback_format_fields) {
+                mod_amqp_cdr_routing_key(is_b, msg->cc_routing_key, channel, cdr->format_fields);
+            }
 
             snprintf(msg->routing_key, sizeof(msg->routing_key), "%s", is_b ? cdr->binding_key_b : cdr->binding_key_a);
 
@@ -198,10 +237,12 @@ switch_status_t mod_amqp_cdr_create(char *name, switch_xml_t cfg)
     switch_xml_t params, param, connections, connection;
     switch_threadattr_t *thd_attr = NULL;
     char *exchange = NULL, *exchange_type = NULL, *queue_leg_a = NULL, *queue_leg_b = NULL;
+    char *format_fields[MAX_ROUTING_KEY_FORMAT_FIELDS+1];
+    int format_fields_size = 0;
 
     int exchange_durable = 1; /* durable */
     int delivery_mode = -1;
-    int delivery_timestamp = 1;
+    int arg = 0, i = 0;
     switch_memory_pool_t *pool;
 
     if (switch_core_new_memory_pool(&pool) != SWITCH_STATUS_SUCCESS) {
@@ -220,6 +261,9 @@ switch_status_t mod_amqp_cdr_create(char *name, switch_xml_t cfg)
     profile->circuit_breaker_ms = 10000;
     profile->reconnect_interval_ms = 1000;
     profile->send_queue_size = 5000;
+
+    memset(profile->format_fields, 0, (MAX_ROUTING_KEY_FORMAT_FIELDS + 1) * sizeof(mod_amqp_keypart_t));
+    memset(format_fields, 0, MAX_ROUTING_KEY_FORMAT_FIELDS + 1);
 
     if ((params = switch_xml_child(cfg, "params")) != NULL) {
         for (param = switch_xml_child(params, "param"); param; param = param->next) {
@@ -259,8 +303,6 @@ switch_status_t mod_amqp_cdr_create(char *name, switch_xml_t cfg)
                 exchange_durable = switch_true(val);
             } else if (!strncmp(var, "delivery-mode", 13)) {
                 delivery_mode = atoi(val);
-            } else if (!strncmp(var, "delivery-timestamp", 18)) {
-                delivery_timestamp = switch_true(val);
             } else if (!strncmp(var, "exchange_type", 13)) {
                 switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Found exchange_type parameter. please change to exchange-type\n");
             } else if (!strncmp(var, "queue-name-leg-a", 16)) {
@@ -269,19 +311,49 @@ switch_status_t mod_amqp_cdr_create(char *name, switch_xml_t cfg)
                 queue_leg_b = switch_core_strdup(profile->pool, val);
             } else if (!strncmp(var, "exchange", 8)) {
                 switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Found exchange parameter. please change to exchange-name\n");
+            } else if (!strncmp(var, "enable_fallback_format_fields", 29)) {
+                int interval = atoi(val);
+                if ( interval && interval > 0 ) {
+                    profile->enable_fallback_format_fields = 1;
+                    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "amqp fallback format fields enabled\n");
+                }
+            } else if (!strncmp(var, "format_fields", 13)) {
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "amqp format fields : %s\n", val);
+                if ((format_fields_size = mod_amqp_count_chars(val, ',')) >= MAX_ROUTING_KEY_FORMAT_FIELDS) {
+                    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "You can have only %d routing fields in the routing key.\n",
+                                      MAX_ROUTING_KEY_FORMAT_FIELDS);
+                    goto err;
+                }
+
+                /* increment size because the count returned the number of separators, not number of fields */
+                format_fields_size++;
+                switch_separate_string(val, ',', format_fields, MAX_ROUTING_KEY_FORMAT_FIELDS);
+                format_fields[format_fields_size] = NULL;
             }
         } /* params for loop */
     }
+
 
     /* Handle defaults of string types */
     profile->exchange = exchange ? exchange : switch_core_strdup(profile->pool, "TAP.Events");
     profile->exchange_type = exchange_type ? exchange_type : switch_core_strdup(profile->pool, "topic");
     profile->exchange_durable = exchange_durable;
     profile->delivery_mode = delivery_mode;
-    profile->delivery_timestamp = delivery_timestamp;
 
     profile->queue_name_a = queue_leg_a ? queue_leg_a : "cdr-leg-a";
     profile->queue_name_b = queue_leg_b ? queue_leg_b : "cdr-leg-b";
+
+    for(i = 0; i < format_fields_size; i++) {
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "amqp routing key %d : %s\n", i, format_fields[i]);
+        if(profile->enable_fallback_format_fields) {
+            profile->format_fields[i].size = switch_separate_string(format_fields[i], '|', profile->format_fields[i].name, MAX_ROUTING_KEY_FORMAT_FALLBACK_FIELDS);
+            if(profile->format_fields[i].size > 1) {
+                for(arg = 0; arg < profile->format_fields[i].size; arg++) {
+                    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "amqp routing key %d : sub key %d : %s\n", i, arg, profile->format_fields[i].name[arg]);
+                }
+            }
+        }
+    }
 
     if ((connections = switch_xml_child(cfg, "connections")) != NULL) {
         for (connection = switch_xml_child(connections, "connection"); connection; connection = connection->next) {

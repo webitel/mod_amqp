@@ -60,6 +60,7 @@
 
 typedef struct {
     char routing_key[MAX_AMQP_ROUTING_KEY_LENGTH];
+    char cc_routing_key[MAX_AMQP_ROUTING_KEY_LENGTH];
     char *pjson;
 } mod_amqp_message_t;
 
@@ -182,7 +183,6 @@ typedef struct {
     int exchange_durable;
     int exchange_auto_delete;
     int delivery_mode;
-    int delivery_timestamp;
 
     char *queue_name_a;
     char *queue_name_b;
@@ -196,6 +196,9 @@ typedef struct {
 
     int reconnect_interval_ms;
     int circuit_breaker_ms;
+
+    mod_amqp_keypart_t format_fields[MAX_ROUTING_KEY_FORMAT_FIELDS+1];
+    switch_bool_t enable_fallback_format_fields;
 
     int log_a;
     int log_b;
