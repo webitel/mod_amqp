@@ -169,11 +169,11 @@ switch_status_t mod_amqp_connection_open(mod_amqp_connection_t *connections, mod
 
 	return SWITCH_STATUS_SUCCESS;
 
-	err:
-	if (newConnection) {
-		amqp_destroy_connection(newConnection);
-	}
-	return SWITCH_STATUS_GENERR;
+err:
+    if (newConnection) {
+        amqp_destroy_connection(newConnection);
+    }
+    return SWITCH_STATUS_GENERR;
 }
 
 switch_status_t mod_amqp_connection_create(mod_amqp_connection_t **conn, switch_xml_t cfg, switch_memory_pool_t *pool)

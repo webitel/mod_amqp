@@ -263,7 +263,7 @@ switch_status_t mod_amqp_cdr_create(char *name, switch_xml_t cfg)
     profile->send_queue_size = 5000;
 
     memset(profile->format_fields, 0, (MAX_ROUTING_KEY_FORMAT_FIELDS + 1) * sizeof(mod_amqp_keypart_t));
-    memset(format_fields, 0, MAX_ROUTING_KEY_FORMAT_FIELDS + 1);
+    memset(format_fields, 0, sizeof(format_fields));
 
     if ((params = switch_xml_child(cfg, "params")) != NULL) {
         for (param = switch_xml_child(params, "param"); param; param = param->next) {
@@ -413,12 +413,23 @@ switch_status_t mod_amqp_cdr_connect(mod_amqp_cdr_profile_t *profile)
 
     if ( mod_amqp_connection_open(profile->conn_root, &(profile->conn_active), profile->name, profile->custom_attr)	== SWITCH_STATUS_SUCCESS ) {
         // Ensure that the exchange exists, and is of the correct type
+#if AMQP_VERSION_MAJOR == 0 && AMQP_VERSION_MINOR >= 6
         amqp_exchange_declare(profile->conn_active->state, 1,
                               amqp_cstring_bytes(profile->exchange),
                               amqp_cstring_bytes(profile->exchange_type),
+                              0, /* passive */
+                              profile->exchange_durable,
+                              profile->exchange_auto_delete,
                               0,
-                              1,
                               amqp_empty_table);
+#else
+        amqp_exchange_declare(profile->conn_active->state, 1,
+						  amqp_cstring_bytes(profile->exchange),
+						  amqp_cstring_bytes(profile->exchange_type),
+						  0, /* passive */
+						  profile->exchange_durable,
+						  amqp_empty_table);
+#endif
 
         if ((status = mod_amqp_log_if_amqp_error(amqp_get_rpc_reply(profile->conn_active->state),
                                             "Declaring exchange")) < 0) {

@@ -180,7 +180,7 @@ switch_status_t mod_amqp_producer_create(char *name, switch_xml_t cfg)
 	char *format_fields[MAX_ROUTING_KEY_FORMAT_FIELDS+1];
 	int format_fields_size = 0;
 
-	memset(format_fields, 0, MAX_ROUTING_KEY_FORMAT_FIELDS + 1);
+	memset(format_fields, 0, sizeof(format_fields));
 
 	if (switch_core_new_memory_pool(&pool) != SWITCH_STATUS_SUCCESS) {
 		goto err;
@@ -326,17 +326,16 @@ switch_status_t mod_amqp_producer_create(char *name, switch_xml_t cfg)
 	}
 	profile->conn_active = NULL;
 
-    /* Create a bounded FIFO queue for sending messages */
-    if (switch_queue_create(&(profile->send_queue), profile->send_queue_size, profile->pool) != SWITCH_STATUS_SUCCESS) {
-        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Cannot create send queue of size %d!\n",
-                          profile->send_queue_size);
-        goto err;
-    }
+	/* Create a bounded FIFO queue for sending messages */
+	if (switch_queue_create(&(profile->send_queue), profile->send_queue_size, profile->pool) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Cannot create send queue of size %d!\n",
+						  profile->send_queue_size);
+		goto err;
+	}
 
 	/* Start the event send thread. This will set up the initial connection */
 	switch_threadattr_create(&thd_attr, profile->pool);
 	switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
-
 	if (switch_thread_create(&profile->producer_thread, thd_attr, mod_amqp_producer_thread, profile, profile->pool)) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Cannot create 'amqp event sender' thread!\n");
 		goto err;
@@ -448,18 +447,29 @@ void * SWITCH_THREAD_FUNC mod_amqp_producer_thread(switch_thread_t *thread, void
 			status = mod_amqp_connection_open(profile->conn_root, &(profile->conn_active), profile->name, profile->custom_attr);
 			if ( status	== SWITCH_STATUS_SUCCESS ) {
 				// Ensure that the exchange exists, and is of the correct type
+#if AMQP_VERSION_MAJOR == 0 && AMQP_VERSION_MINOR >= 6
+				amqp_exchange_declare(profile->conn_active->state, 1,
+									  amqp_cstring_bytes(profile->exchange),
+									  amqp_cstring_bytes(profile->exchange_type),
+									  passive,
+									  durable,
+									  profile->exchange_auto_delete,
+									  0,
+									  amqp_empty_table);
+#else
 				amqp_exchange_declare(profile->conn_active->state, 1,
 									  amqp_cstring_bytes(profile->exchange),
 									  amqp_cstring_bytes(profile->exchange_type),
 									  passive,
 									  durable,
 									  amqp_empty_table);
+#endif
 
-                if (!mod_amqp_log_if_amqp_error(amqp_get_rpc_reply(profile->conn_active->state),
-                                                "Declaring exchange")) {
-                    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Amqp reconnect successful- connected\n");
-                    continue;
-                }
+				if (!mod_amqp_log_if_amqp_error(amqp_get_rpc_reply(profile->conn_active->state),
+												"Declaring exchange")) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Amqp reconnect successful- connected\n");
+					continue;
+				}
 			}
 
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Profile[%s] failed to connect with code(%d), sleeping for %dms\n",
@@ -468,66 +478,66 @@ void * SWITCH_THREAD_FUNC mod_amqp_producer_thread(switch_thread_t *thread, void
 			continue;
 		}
 
-        while (profile->running && profile->conn_active) {
+		while (profile->running && profile->conn_active) {
 
-            //TODO check connection & push if no send
-            //printf("Conn run: %d act: %d\n", profile->running ? 1 : 0, profile->conn_active ? 1 : 0);
+			//TODO check connection & push if no send
+			//printf("Conn run: %d act: %d\n", profile->running ? 1 : 0, profile->conn_active ? 1 : 0);
 
-            if (!msg && switch_queue_pop_timeout(profile->send_queue, (void**)&msg, 1000000) != SWITCH_STATUS_SUCCESS) {
-                continue;
-            }
+			if (!msg && switch_queue_pop_timeout(profile->send_queue, (void**)&msg, 1000000) != SWITCH_STATUS_SUCCESS) {
+				continue;
+			}
 
-            if (msg) {
+			if (msg) {
 #ifdef MOD_AMQP_DEBUG_TIMING
-                long times[TIME_STATS_TO_AGGREGATE];
-                static unsigned int thistime = 0;
-                switch_time_t start = switch_time_now();
+				long times[TIME_STATS_TO_AGGREGATE];
+				static unsigned int thistime = 0;
+				switch_time_t start = switch_time_now();
 #endif
-                switch (mod_amqp_producer_send(profile, msg)) {
-                    case SWITCH_STATUS_SUCCESS:
-                        /* Success: prepare for next message */
-                        mod_amqp_util_msg_destroy(&msg);
-                        break;
+				switch (mod_amqp_producer_send(profile, msg)) {
+					case SWITCH_STATUS_SUCCESS:
+						/* Success: prepare for next message */
+						mod_amqp_util_msg_destroy(&msg);
+						break;
 
-                    case SWITCH_STATUS_NOT_INITALIZED:
-                        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Send failed with 'not initialised'\n");
-                        break;
+					case SWITCH_STATUS_NOT_INITALIZED:
+						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Send failed with 'not initialised'\n");
+						break;
 
-                    case SWITCH_STATUS_SOCKERR:
-                        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Send failed with 'socket error'\n");
-                        break;
+					case SWITCH_STATUS_SOCKERR:
+						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Send failed with 'socket error'\n");
+						break;
 
-                    default:
-                        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Send failed with a generic error\n");
+					default:
+						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Send failed with a generic error\n");
 
-                        /* Send failed and closed the connection; reconnect will happen at the beginning of the loop
+						/* Send failed and closed the connection; reconnect will happen at the beginning of the loop
                          * NB: do we need a delay here to prevent a fast reconnect-send-fail loop? */
-                        break;
-                }
+						break;
+				}
 
 #ifdef MOD_AMQP_DEBUG_TIMING
-                times[thistime++] = switch_time_now() - start;
-                if (thistime >= TIME_STATS_TO_AGGREGATE) {
-                    int i;
-                    long min_time, max_time, avg_time;
+				times[thistime++] = switch_time_now() - start;
+				if (thistime >= TIME_STATS_TO_AGGREGATE) {
+					int i;
+					long min_time, max_time, avg_time;
 
-                    /* Calculate aggregate times */
-                    min_time = max_time = avg_time = times[0];
-                    for (i = 1; i < TIME_STATS_TO_AGGREGATE; ++i) {
+					/* Calculate aggregate times */
+					min_time = max_time = avg_time = times[0];
+					for (i = 1; i < TIME_STATS_TO_AGGREGATE; ++i) {
 
-                        avg_time += times[i];
-                        if (times[i] < min_time) min_time = times[i];
-                        if (times[i] > max_time) max_time = times[i];
-                    }
+						avg_time += times[i];
+						if (times[i] < min_time) min_time = times[i];
+						if (times[i] > max_time) max_time = times[i];
+					}
 
-                    avg_time /= TIME_STATS_TO_AGGREGATE;
-                    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Microseconds to send last %d messages: Min %ld  Max %ld  Avg %ld\n",
-                                      TIME_STATS_TO_AGGREGATE, min_time, max_time, avg_time);
-                    thistime = 0;
-                }
+					avg_time /= TIME_STATS_TO_AGGREGATE;
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Microseconds to send last %d messages: Min %ld  Max %ld  Avg %ld\n",
+									  TIME_STATS_TO_AGGREGATE, min_time, max_time, avg_time);
+					thistime = 0;
+				}
 #endif
-            }
-        }
+			}
+		}
 	}
 
 	/* Abort the current message */
