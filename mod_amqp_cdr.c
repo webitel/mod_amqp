@@ -1,4 +1,5 @@
 #include "mod_amqp.h"
+#include "mod_amqp_cdr_utils.h"
 #include "switch.h"
 
 
@@ -128,7 +129,7 @@ switch_status_t mod_amqp_cdr_reporting(switch_core_session_t *session)
 
     is_b = channel && switch_channel_get_originator_caller_profile(channel);
 
-    if (switch_ivr_generate_json_cdr(session, &json_cdr, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS) {
+    if (generate_json_cdr(session, &json_cdr, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS) {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error Generating Data!\n");
         return SWITCH_STATUS_FALSE;
     }
