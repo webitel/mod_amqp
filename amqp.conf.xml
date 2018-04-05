@@ -88,6 +88,9 @@
                     <param name="heartbeat" value="0"/>
                 </connection>
             </connections>
+            <filters>
+                <variable name="loopback_leg" value="B"/>
+            </filters>
             <params>
                 <param name="exchange-name" value="TAP.CDR"/>
                 <param name="exchange-type" value="topic"/>

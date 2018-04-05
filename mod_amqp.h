@@ -174,6 +174,10 @@ typedef struct {
   switch_memory_pool_t *pool;
 } mod_amqp_logging_profile_t;
 
+typedef struct mod_amqp_cdr_filter_s {
+    char *name;
+    char *value;
+} mod_amqp_cdr_filter_t;
 
 typedef struct {
     char *name;
@@ -206,6 +210,8 @@ typedef struct {
     switch_thread_t *cdr_thread;
     switch_queue_t *send_queue;
     unsigned int send_queue_size;
+
+    switch_hash_t *filter;
 
     switch_mutex_t *mutex;
     switch_bool_t running;

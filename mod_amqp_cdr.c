@@ -116,6 +116,24 @@ switch_status_t mod_amqp_cdr_send(mod_amqp_cdr_profile_t *profile, mod_amqp_mess
     return SWITCH_STATUS_SUCCESS;
 }
 
+
+static switch_bool_t mod_amqp_cdr_skip_by_filter (mod_amqp_cdr_profile_t *profile, switch_channel_t *channel) {
+    switch_hash_index_t *hi = NULL;
+    const char *var;
+    const void *key;
+    void *val;
+
+    for (hi = switch_core_hash_first(profile->filter); hi; hi = switch_core_hash_next(&hi)) {
+        switch_core_hash_this(hi, &key, NULL, &val);
+        var = switch_channel_get_variable(channel, (char *) key);
+        if (var && strcmp(var, (char*)val) == 0) {
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Skip reporting: filter %s = %s !\n", (char *) key, (char*)val);
+            return SWITCH_TRUE;
+        }
+    }
+    return SWITCH_FALSE;
+}
+
 switch_status_t mod_amqp_cdr_reporting(switch_core_session_t *session)
 {
     switch_hash_index_t *hi = NULL;
@@ -126,6 +144,7 @@ switch_status_t mod_amqp_cdr_reporting(switch_core_session_t *session)
     mod_amqp_message_t *msg = NULL;
     cJSON *json_cdr = NULL;
     char *json_text = NULL;
+    switch_bool_t skip_by_filter = SWITCH_FALSE;
 
     is_b = channel && switch_channel_get_originator_caller_profile(channel);
 
@@ -146,6 +165,10 @@ switch_status_t mod_amqp_cdr_reporting(switch_core_session_t *session)
         switch_core_hash_this(hi, NULL, NULL, (void **) &cdr);
 
         if (cdr) {
+            skip_by_filter = mod_amqp_cdr_skip_by_filter(cdr, channel);
+            if (skip_by_filter == SWITCH_TRUE) {
+                continue;
+            }
             /* Create message */
             switch_malloc(msg, sizeof(mod_amqp_message_t));
             msg->pjson = strdup(json_text);
@@ -172,7 +195,7 @@ done:
     if (json_cdr) {
         cJSON_Delete(json_cdr);
     }
-    if (snd == 0) {
+    if (snd == 0 && skip_by_filter != SWITCH_TRUE) {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Error sending data!\n");
         return SWITCH_STATUS_FALSE;
     } else {
@@ -224,6 +247,10 @@ switch_status_t mod_amqp_cdr_destroy(mod_amqp_cdr_profile_t **prof)
         switch_core_destroy_memory_pool(&pool);
     }
 
+    if (profile->filter) {
+        switch_core_hash_destroy(&profile->filter);
+    }
+
     *prof = NULL;
 
     switch_core_remove_state_handler(&state_handlers);
@@ -254,6 +281,8 @@ switch_status_t mod_amqp_cdr_create(char *name, switch_xml_t cfg)
     profile->pool = pool;
     profile->name = switch_core_strdup(profile->pool, name);
     profile->running = 1;
+
+    switch_core_hash_init(&profile->filter);
 
     profile->conn_root   = NULL;
     profile->conn_active = NULL;
@@ -334,6 +363,16 @@ switch_status_t mod_amqp_cdr_create(char *name, switch_xml_t cfg)
         } /* params for loop */
     }
 
+    if ((params = switch_xml_child(cfg, "filters")) != NULL) {
+        for (param = switch_xml_child(params, "variable"); param; param = param->next) {
+            char *var = (char *) switch_xml_attr_soft(param, "name");
+            char *val = (char *) switch_xml_attr_soft(param, "value");
+            if (!zstr(val) && !zstr(var)) {
+                switch_core_hash_insert(profile->filter, var, val);
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Add filter variable %s = %s\n", var, val);
+            }
+        }
+    }
 
     /* Handle defaults of string types */
     profile->exchange = exchange ? exchange : switch_core_strdup(profile->pool, "TAP.Events");
