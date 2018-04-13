@@ -2,6 +2,7 @@
 #include "mod_amqp_cdr_utils.h"
 #include "switch.h"
 
+#define VARIABLE_HOLD_B_ACCUM_SECONDS  "hold_b_accum_seconds"
 
 static switch_state_handler_table_t state_handlers = {
         /*.on_init */ NULL,
@@ -17,6 +18,34 @@ static switch_state_handler_table_t state_handlers = {
         /*.on_reporting */ mod_amqp_cdr_reporting
 };
 
+static void cdr_export_hold (switch_channel_t *channel_a, switch_channel_t *channel_b) {
+    switch_caller_profile_t *caller_b = switch_channel_get_caller_profile(channel_b);
+    if (caller_b && caller_b->times) {
+        const char *hold_leg = switch_channel_get_variable(channel_a, VARIABLE_HOLD_B_ACCUM_SECONDS);
+        int prev_hold = 0;
+        if (hold_leg) {
+            prev_hold = atoi(hold_leg);
+        }
+        switch_channel_set_variable_printf(channel_a, VARIABLE_HOLD_B_ACCUM_SECONDS, "%d",
+                                           ((int)caller_b->times->hold_accum / 1000000) + prev_hold);
+    }
+}
+
+
+static void cdr_channel_bridge_event_handler(switch_event_t *event) {
+    switch_core_session_t *leg_a_session, *leg_b_session;
+
+    leg_a_session = switch_core_session_force_locate(switch_event_get_header(event, "Bridge-A-Unique-ID"));
+    leg_b_session = switch_core_session_force_locate(switch_event_get_header(event, "Bridge-B-Unique-ID"));
+
+    if (leg_a_session && leg_b_session) {
+        switch_channel_t *channel_a = switch_core_session_get_channel(leg_a_session);
+        switch_channel_t *channel_b = switch_core_session_get_channel(leg_b_session);
+        if (channel_a && channel_b) {
+            cdr_export_hold(channel_a, channel_b);
+        }
+    }
+}
 
 static switch_status_t mod_amqp_cdr_routing_key(int is_b, char routingKey[MAX_AMQP_ROUTING_KEY_LENGTH],
                                          switch_channel_t* channel, mod_amqp_keypart_t routingKeyEventHeaderNames[]) {
@@ -253,6 +282,8 @@ switch_status_t mod_amqp_cdr_destroy(mod_amqp_cdr_profile_t **prof)
 
     *prof = NULL;
 
+    switch_event_unbind_callback(cdr_channel_bridge_event_handler);
+
     switch_core_remove_state_handler(&state_handlers);
 
     return SWITCH_STATUS_SUCCESS;
@@ -435,7 +466,12 @@ switch_status_t mod_amqp_cdr_create(char *name, switch_xml_t cfg)
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to insert new profile [%s] into mod_amqp profile hash\n", name);
         goto err;
     }
+
     switch_core_add_state_handler(&state_handlers);
+
+    if (switch_event_bind("mod_amqp_cdr", SWITCH_EVENT_CHANNEL_UNBRIDGE, SWITCH_EVENT_SUBCLASS_ANY, cdr_channel_bridge_event_handler, NULL) != SWITCH_STATUS_SUCCESS) {
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Couldn't bind to channel_unbridge event!\n");
+    }
 
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Profile[%s] Successfully started\n", profile->name);
     return SWITCH_STATUS_SUCCESS;
