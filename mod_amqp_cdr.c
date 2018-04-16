@@ -20,7 +20,7 @@ static switch_state_handler_table_t state_handlers = {
 
 static void cdr_export_hold (switch_channel_t *channel_a, switch_channel_t *channel_b) {
     switch_caller_profile_t *caller_b = switch_channel_get_caller_profile(channel_b);
-    if (caller_b && caller_b->times) {
+    if (caller_b && caller_b->times->hold_accum) {
         const char *hold_leg = switch_channel_get_variable(channel_a, VARIABLE_HOLD_B_ACCUM_SECONDS);
         int prev_hold = 0;
         if (hold_leg) {
@@ -34,17 +34,29 @@ static void cdr_export_hold (switch_channel_t *channel_a, switch_channel_t *chan
 
 static void cdr_channel_bridge_event_handler(switch_event_t *event) {
     switch_core_session_t *leg_a_session, *leg_b_session;
+    switch_channel_t *channel_a, *channel_b;
 
     leg_a_session = switch_core_session_force_locate(switch_event_get_header(event, "Bridge-A-Unique-ID"));
+
+    if (!leg_a_session) {
+        return;
+    }
+
     leg_b_session = switch_core_session_force_locate(switch_event_get_header(event, "Bridge-B-Unique-ID"));
 
-    if (leg_a_session && leg_b_session) {
-        switch_channel_t *channel_a = switch_core_session_get_channel(leg_a_session);
-        switch_channel_t *channel_b = switch_core_session_get_channel(leg_b_session);
-        if (channel_a && channel_b) {
-            cdr_export_hold(channel_a, channel_b);
-        }
+    if (!leg_b_session) {
+        switch_core_session_rwunlock(leg_a_session);
+        return;
     }
+
+    channel_a = switch_core_session_get_channel(leg_a_session);
+    channel_b = switch_core_session_get_channel(leg_b_session);
+    if (channel_a && channel_b) {
+        cdr_export_hold(channel_a, channel_b);
+    }
+
+    switch_core_session_rwunlock(leg_a_session);
+    switch_core_session_rwunlock(leg_b_session);
 }
 
 static switch_status_t mod_amqp_cdr_routing_key(int is_b, char routingKey[MAX_AMQP_ROUTING_KEY_LENGTH],
