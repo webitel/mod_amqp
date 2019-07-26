@@ -180,7 +180,7 @@ switch_status_t mod_amqp_producer_create(char *name, switch_xml_t cfg)
 	char *format_fields[MAX_ROUTING_KEY_FORMAT_FIELDS+1];
 	int format_fields_size = 0;
 
-	memset(format_fields, 0, sizeof(format_fields));
+	memset(format_fields, 0, (MAX_ROUTING_KEY_FORMAT_FIELDS + 1) * sizeof(char *));
 
 	if (switch_core_new_memory_pool(&pool) != SWITCH_STATUS_SUCCESS) {
 		goto err;
@@ -254,8 +254,10 @@ switch_status_t mod_amqp_producer_create(char *name, switch_xml_t cfg)
 			} else if (!strncmp(var, "content-type", 12)) {
 				content_type = switch_core_strdup(profile->pool, val);
 			} else if (!strncmp(var, "format_fields", 13)) {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "amqp format fields : %s\n", val);
-				if ((format_fields_size = mod_amqp_count_chars(val, ',')) >= MAX_ROUTING_KEY_FORMAT_FIELDS) {
+				char *tmp = switch_core_strdup(profile->pool, val);
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "amqp format fields : %s\n", tmp);
+
+				if ((format_fields_size = mod_amqp_count_chars(tmp, ',')) >= MAX_ROUTING_KEY_FORMAT_FIELDS) {
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "You can have only %d routing fields in the routing key.\n",
 									  MAX_ROUTING_KEY_FORMAT_FIELDS);
 					goto err;
@@ -266,8 +268,9 @@ switch_status_t mod_amqp_producer_create(char *name, switch_xml_t cfg)
 				switch_separate_string(val, ',', format_fields, MAX_ROUTING_KEY_FORMAT_FIELDS);
 				format_fields[format_fields_size] = NULL;
 			} else if (!strncmp(var, "event_filter", 12)) {
+				char *tmp = switch_core_strdup(profile->pool, val);
 				/* Parse new events */
-				profile->event_subscriptions = switch_separate_string(val, ',', argv, (sizeof(argv) / sizeof(argv[0])));
+				profile->event_subscriptions = switch_separate_string(tmp, ',', argv, (sizeof(argv) / sizeof(argv[0])));
 
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Found %d subscriptions\n", profile->event_subscriptions);
 
@@ -480,7 +483,7 @@ void * SWITCH_THREAD_FUNC mod_amqp_producer_thread(switch_thread_t *thread, void
 #endif
 
 				if (!mod_amqp_log_if_amqp_error(amqp_get_rpc_reply(profile->conn_active->state),
-												"Declaring exchange")) {
+												"Declaring exchange\n")) {
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Amqp reconnect successful- connected\n");
 					continue;
 				}
