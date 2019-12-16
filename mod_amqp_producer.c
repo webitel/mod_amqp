@@ -70,51 +70,46 @@ switch_status_t mod_amqp_producer_routing_key(mod_amqp_producer_profile_t *profi
 
 void mod_amqp_producer_event_handler(switch_event_t* evt)
 {
-	mod_amqp_message_t *amqp_message;
-	mod_amqp_producer_profile_t *profile = (mod_amqp_producer_profile_t *)evt->bind_user_data;
-	switch_time_t now = switch_time_now();
-	switch_time_t reset_time;
+    mod_amqp_message_t *amqp_message;
+    mod_amqp_producer_profile_t *profile = (mod_amqp_producer_profile_t *)evt->bind_user_data;
+    switch_time_t now = switch_time_now();
+    switch_time_t reset_time;
 
-	if (!profile) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Event without a profile %p %p\n", (void *)evt, (void *)evt->event_user_data);
-		return;
-	}
+    if (!profile) {
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Event without a profile %p %p\n", (void *)evt, (void *)evt->event_user_data);
+        return;
+    }
 
-	/* If the mod is disabled ignore the event */
-	if (!profile->running) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Profile[%s] not running\n", profile->name);
-		return;
-	}
+    /* If the mod is disabled ignore the event */
+    if (!profile->running) {
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Profile[%s] not running\n", profile->name);
+        return;
+    }
 
-	/* If the circuit breaker is active, ignore the event */
-	reset_time = profile->circuit_breaker_reset_time;
-	if (now < reset_time) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Profile[%s] circuit breaker hit[%d] (%d)\n", profile->name, (int) now, (int) reset_time);
-		return;
-	}
+    /* If the circuit breaker is active, ignore the event */
+    reset_time = profile->circuit_breaker_reset_time;
+    if (now < reset_time) {
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Profile[%s] circuit breaker hit[%d] (%d)\n", profile->name, (int) now, (int) reset_time);
+        return;
+    }
 
-	if (!profile->conn_active || !profile->send_queue) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Profile[%s] not active\n", profile->name);
-		return;
-	}
+    switch_malloc(amqp_message, sizeof(mod_amqp_message_t));
 
-	switch_malloc(amqp_message, sizeof(mod_amqp_message_t));
+    switch_event_serialize_json(evt, &amqp_message->pjson);
+    mod_amqp_producer_routing_key(profile, amqp_message->routing_key, evt, profile->format_fields);
 
-	switch_event_serialize_json(evt, &amqp_message->pjson);
-	mod_amqp_producer_routing_key(profile, amqp_message->routing_key, evt, profile->format_fields);
+    /* Queue the message to be sent by the worker thread, errors are reported only once per circuit breaker interval */
+    if (switch_queue_trypush(profile->send_queue, amqp_message) != SWITCH_STATUS_SUCCESS) {
+        unsigned int queue_size = switch_queue_size(profile->send_queue);
 
-	/* Queue the message to be sent by the worker thread, errors are reported only once per circuit breaker interval */
-	if (switch_queue_trypush(profile->send_queue, amqp_message) != SWITCH_STATUS_SUCCESS) {
-		unsigned int queue_size = switch_queue_size(profile->send_queue);
+        /* Trip the circuit breaker for a short period to stop recurring error messages (time is measured in uS) */
+        profile->circuit_breaker_reset_time = now + profile->circuit_breaker_ms * 1000;
 
-		/* Trip the circuit breaker for a short period to stop recurring error messages (time is measured in uS) */
-		profile->circuit_breaker_reset_time = now + profile->circuit_breaker_ms * 1000;
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMQP message queue full. Messages will be dropped for %.1fs! (Queue capacity %d)",
+                          profile->circuit_breaker_ms / 1000.0, queue_size);
 
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMQP message queue full. Messages will be dropped for %.1fs! (Queue capacity %d)",
-						  profile->circuit_breaker_ms / 1000.0, queue_size);
-
-		mod_amqp_util_msg_destroy(&amqp_message);
-	}
+        mod_amqp_util_msg_destroy(&amqp_message);
+    }
 }
 
 switch_status_t mod_amqp_producer_destroy(mod_amqp_producer_profile_t **prof) {
@@ -329,6 +324,7 @@ switch_status_t mod_amqp_producer_create(char *name, switch_xml_t cfg)
 		}
 	}
 	profile->conn_active = NULL;
+    /* We are not going to open the producer queue connection on create, but instead wait for the running thread to open it */
 
 	/* Create a bounded FIFO queue for sending messages */
 	if (switch_queue_create(&(profile->send_queue), profile->send_queue_size, profile->pool) != SWITCH_STATUS_SUCCESS) {
@@ -495,66 +491,60 @@ void * SWITCH_THREAD_FUNC mod_amqp_producer_thread(switch_thread_t *thread, void
 			continue;
 		}
 
-		while (profile->running && profile->conn_active) {
+        if (!msg && switch_queue_pop_timeout(profile->send_queue, (void**)&msg, 1000000) != SWITCH_STATUS_SUCCESS) {
+            continue;
+        }
 
-			//TODO check connection & push if no send
-			//printf("Conn run: %d act: %d\n", profile->running ? 1 : 0, profile->conn_active ? 1 : 0);
-
-			if (!msg && switch_queue_pop_timeout(profile->send_queue, (void**)&msg, 1000000) != SWITCH_STATUS_SUCCESS) {
-				continue;
-			}
-
-			if (msg) {
+        if (msg) {
 #ifdef MOD_AMQP_DEBUG_TIMING
-				long times[TIME_STATS_TO_AGGREGATE];
-				static unsigned int thistime = 0;
-				switch_time_t start = switch_time_now();
+            long times[TIME_STATS_TO_AGGREGATE];
+            static unsigned int thistime = 0;
+            switch_time_t start = switch_time_now();
 #endif
-				switch (mod_amqp_producer_send(profile, msg)) {
-					case SWITCH_STATUS_SUCCESS:
-						/* Success: prepare for next message */
-						mod_amqp_util_msg_destroy(&msg);
-						break;
+            switch (mod_amqp_producer_send(profile, msg)) {
+                case SWITCH_STATUS_SUCCESS:
+                    /* Success: prepare for next message */
+                    mod_amqp_util_msg_destroy(&msg);
+                    break;
 
-					case SWITCH_STATUS_NOT_INITALIZED:
-						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Send failed with 'not initialised'\n");
-						break;
+                case SWITCH_STATUS_NOT_INITALIZED:
+                    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Send failed with 'not initialised'\n");
+                    break;
 
-					case SWITCH_STATUS_SOCKERR:
-						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Send failed with 'socket error'\n");
-						break;
+                case SWITCH_STATUS_SOCKERR:
+                    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Send failed with 'socket error'\n");
+                    break;
 
-					default:
-						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Send failed with a generic error\n");
+                default:
+                    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Send failed with a generic error\n");
 
-						/* Send failed and closed the connection; reconnect will happen at the beginning of the loop
-                         * NB: do we need a delay here to prevent a fast reconnect-send-fail loop? */
-						break;
-				}
+                    /* Send failed and closed the connection; reconnect will happen at the beginning of the loop
+                     * NB: do we need a delay here to prevent a fast reconnect-send-fail loop? */
+                    break;
+            }
 
 #ifdef MOD_AMQP_DEBUG_TIMING
-				times[thistime++] = switch_time_now() - start;
-				if (thistime >= TIME_STATS_TO_AGGREGATE) {
-					int i;
-					long min_time, max_time, avg_time;
+            times[thistime++] = switch_time_now() - start;
+            if (thistime >= TIME_STATS_TO_AGGREGATE) {
+                int i;
+                long min_time, max_time, avg_time;
 
-					/* Calculate aggregate times */
-					min_time = max_time = avg_time = times[0];
-					for (i = 1; i < TIME_STATS_TO_AGGREGATE; ++i) {
+                /* Calculate aggregate times */
+                min_time = max_time = avg_time = times[0];
+                for (i = 1; i < TIME_STATS_TO_AGGREGATE; ++i) {
 
-						avg_time += times[i];
-						if (times[i] < min_time) min_time = times[i];
-						if (times[i] > max_time) max_time = times[i];
-					}
+                    avg_time += times[i];
+                    if (times[i] < min_time) min_time = times[i];
+                    if (times[i] > max_time) max_time = times[i];
+                }
 
-					avg_time /= TIME_STATS_TO_AGGREGATE;
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Microseconds to send last %d messages: Min %ld  Max %ld  Avg %ld\n",
-									  TIME_STATS_TO_AGGREGATE, min_time, max_time, avg_time);
-					thistime = 0;
-				}
+                avg_time /= TIME_STATS_TO_AGGREGATE;
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Microseconds to send last %d messages: Min %ld  Max %ld  Avg %ld\n",
+                                  TIME_STATS_TO_AGGREGATE, min_time, max_time, avg_time);
+                thistime = 0;
+            }
 #endif
-			}
-		}
+        }
 	}
 
 	/* Abort the current message */
