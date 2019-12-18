@@ -511,9 +511,21 @@ void * SWITCH_THREAD_FUNC mod_amqp_producer_thread(switch_thread_t *thread, void
                     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Send failed with 'not initialised'\n");
                     break;
 
-                case SWITCH_STATUS_SOCKERR:
-                    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Send failed with 'socket error'\n");
+                case SWITCH_STATUS_SOCKERR: {
+                    mod_amqp_message_t *msg_dup = NULL;
+                    switch_malloc(msg_dup, sizeof(mod_amqp_message_t));
+                    *msg_dup = *msg;
+                    msg = NULL;
+                    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Send failed with 'socket error'\n");
+                    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "message %s\n", msg_dup->pjson);
+
+                    if (switch_queue_trypush(profile->send_queue, msg_dup) != SWITCH_STATUS_SUCCESS) {
+                        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+                                          "error placing the event in the listeners queue\n");
+                        mod_amqp_util_msg_destroy(&msg_dup);
+                    }
                     break;
+                }
 
                 default:
                     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Send failed with a generic error\n");
