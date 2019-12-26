@@ -55,11 +55,12 @@ switch_status_t mod_amqp_producer_routing_key(mod_amqp_producer_profile_t *profi
 					break;
 				} else {
 					char *value = switch_event_get_header(evt, routingKeyEventHeaderNames[i].name[x]);
-					if (value) {
-						amqp_util_encode(value, keybuffer);
-						strncpy(routingKey + idx, keybuffer, MAX_AMQP_ROUTING_KEY_LENGTH - idx);
-						break;
+					if (!value) {
+					    value = "";
 					}
+                    amqp_util_encode(value, keybuffer);
+                    strncpy(routingKey + idx, keybuffer, MAX_AMQP_ROUTING_KEY_LENGTH - idx);
+                    break;
 				}
 			}
 			idx += strlen(routingKey + idx);
