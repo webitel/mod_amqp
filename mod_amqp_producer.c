@@ -42,28 +42,36 @@ switch_status_t mod_amqp_producer_routing_key(mod_amqp_producer_profile_t *profi
 											  switch_event_t* evt, mod_amqp_keypart_t routingKeyEventHeaderNames[])
 {
 	int i = 0, idx = 0, x = 0;
+	switch_bool_t  found = SWITCH_TRUE;
+
 	char keybuffer[MAX_AMQP_ROUTING_KEY_LENGTH];
 
 	for (i = 0; i < MAX_ROUTING_KEY_FORMAT_FIELDS && idx < MAX_AMQP_ROUTING_KEY_LENGTH; i++) {
 		if (routingKeyEventHeaderNames[i].size) {
-			if (idx) {
+			if (idx || found == SWITCH_FALSE) {
 				routingKey[idx++] = '.';
 			}
+            found = SWITCH_FALSE;
+
 			for( x = 0; x < routingKeyEventHeaderNames[i].size; x++) {
 				if (routingKeyEventHeaderNames[i].name[x][0] == '#') {
 					strncpy(routingKey + idx, routingKeyEventHeaderNames[i].name[x] + 1, MAX_AMQP_ROUTING_KEY_LENGTH - idx);
+					found = SWITCH_TRUE;
 					break;
 				} else {
 					char *value = switch_event_get_header(evt, routingKeyEventHeaderNames[i].name[x]);
-					if (!value) {
-					    value = "";
+					if (value) {
+						amqp_util_encode(value, keybuffer);
+						strncpy(routingKey + idx, keybuffer, MAX_AMQP_ROUTING_KEY_LENGTH - idx);
+                        found = SWITCH_TRUE;
+						break;
 					}
-                    amqp_util_encode(value, keybuffer);
-                    strncpy(routingKey + idx, keybuffer, MAX_AMQP_ROUTING_KEY_LENGTH - idx);
-                    break;
 				}
 			}
-			idx += strlen(routingKey + idx);
+
+			if (found == SWITCH_TRUE) {
+                idx += strlen(routingKey + idx);
+			}
 		}
 	}
 	return SWITCH_STATUS_SUCCESS;
