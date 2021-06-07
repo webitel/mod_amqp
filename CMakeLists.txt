@@ -9,3 +9,8 @@ add_library(mod_amqp SHARED mod_amqp_utils.c mod_amqp_connection.c mod_amqp_prod
 target_include_directories(mod_amqp PRIVATE  ${FREESWITCH_INCLUDE_DIR} )
 
 target_link_libraries(mod_amqp PRIVATE  -pthread)
+
+set_target_properties(mod_amqp PROPERTIES PREFIX "")
+set_target_properties(mod_amqp PROPERTIES OUTPUT_NAME "mod_amqp")
+
+install(TARGETS mod_amqp DESTINATION ${INSTALL_MOD_DIR})
