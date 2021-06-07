@@ -3,6 +3,7 @@
 #include "switch.h"
 
 #define VARIABLE_HOLD_B_ACCUM_SECONDS  "hold_b_accum_seconds"
+#define VARIABLE_ANSWER_B_SECONDS  "answer_b_seconds"
 
 static switch_state_handler_table_t state_handlers = {
         /*.on_init */ NULL,
@@ -18,9 +19,11 @@ static switch_state_handler_table_t state_handlers = {
         /*.on_reporting */ mod_amqp_cdr_reporting
 };
 
-static void cdr_export_hold (switch_channel_t *channel_a, switch_channel_t *channel_b) {
+static void cdr_export_b_channel (switch_channel_t *channel_a, switch_channel_t *channel_b) {
     switch_caller_profile_t *caller_b = switch_channel_get_caller_profile(channel_b);
-    if (caller_b && caller_b->times->hold_accum) {
+    if (!caller_b) return;
+
+    if (caller_b->times->hold_accum) {
         const char *hold_leg = switch_channel_get_variable(channel_a, VARIABLE_HOLD_B_ACCUM_SECONDS);
         int prev_hold = 0;
         if (hold_leg) {
@@ -28,6 +31,11 @@ static void cdr_export_hold (switch_channel_t *channel_a, switch_channel_t *chan
         }
         switch_channel_set_variable_printf(channel_a, VARIABLE_HOLD_B_ACCUM_SECONDS, "%d",
                                            ((int)caller_b->times->hold_accum / 1000000) + prev_hold);
+    }
+
+    if (caller_b->times->answered) {
+        int32_t  answered_b = (time_t) (caller_b->times->answered / 1000000) - (time_t) (caller_b->times->created / 1000000) ;
+        switch_channel_set_variable_printf(channel_a, VARIABLE_ANSWER_B_SECONDS, "%d", answered_b);
     }
 }
 
@@ -52,7 +60,7 @@ static void cdr_channel_bridge_event_handler(switch_event_t *event) {
     channel_a = switch_core_session_get_channel(leg_a_session);
     channel_b = switch_core_session_get_channel(leg_b_session);
     if (channel_a && channel_b) {
-        cdr_export_hold(channel_a, channel_b);
+        cdr_export_b_channel(channel_a, channel_b);
     }
 
     switch_core_session_rwunlock(leg_a_session);
