@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - v*.*
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  version:
+    name: Version
+    uses: webitel/reusable-workflows/.github/workflows/_version.yml@9f48ac29774543de1997736875f48d667af59576
+    with:
+      development-branch: master
+      triggered-branch: ${{ github.ref_name }}
+      build-number: ${{ github.run_number }}
+
+  freeswitch-version:
+    name: Freeswitch version
+    runs-on: [ arc-c-runner-set ]
+    outputs:
+      version: ${{ steps.fs_version.outputs.FREESWITCH_VERSION }}
+
+    steps:
+      - name: Get Freeswitch version
+        id: fs_version
+        run: |
+          FREESWITCH_VERSION=$(freeswitch -version | cut -f 3 -d " " | cut -f 1 -d "-")
+          echo "FREESWITCH_VERSION=$FREESWITCH_VERSION" >> $GITHUB_OUTPUT
+
+  compile:
+    name: Build
+    needs: [ version, freeswitch-version ]
+    uses: webitel/reusable-workflows/.github/workflows/c-build.yml@9f48ac29774543de1997736875f48d667af59576
+    with:
+      version: ${{ needs.version.outputs.version }}
+      version-build: ${{ github.run_number }}
+      version-metadata: freeswitch${{ needs.freeswitch-version.outputs.version }}
+      package-name: freeswitch-mod-amqp
+      package-description: "FreeSWITCH: AMQP module"
+      package-contents: src=mod_amqp.so dst=/usr/lib/freeswitch/mod/mod_amqp.so type=file
+      upload-artifact-pattern: build/mod_amqp.so
+      args: |
+        -DFREESWITCH_INCLUDE_DIR=/usr/include/freeswitch \
+        -DINSTALL_MOD_DIR=/usr/local/freeswitch/mod \
+        -DCMAKE_BUILD_TYPE=Release
+
+  deploy:
+    name: Deploy
+    needs: [ version, compile ]
+    uses: webitel/reusable-workflows/.github/workflows/_deploy.yml@9f48ac29774543de1997736875f48d667af59576
+    secrets: inherit
+    with:
+      component: ${{ needs.version.outputs.component }}
+      repository-environment: ${{ needs.version.outputs.component }}
+      create-tag: true
+      version: ${{ needs.version.outputs.version }}-${{ github.run_number }}
